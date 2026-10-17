@@ -1,0 +1,88 @@
+// stone_wall_align.vfl
+// Per-cell aligned grain — a Houdini COPs study after Ben Wilson's
+// "Alignment Node" breakdown series.
+//
+// WHAT IT DOES
+//   Procedural stone wall where every stone gets its own grain direction:
+//   Voronoi cells -> per-cell random frame -> detail UVs rotated per cell ->
+//   stretched noise in the cell frame = directional grain per stone.
+//
+// SETUP (Houdini)
+//   1. COP Network > VEX Wrangle. On the Wrangle, add a vector3 image plane
+//      named "Cd" (Parameters > Planes). Set resolution to 1024x1024.
+//   2. Paste this code into the VEX Snippet. The ch()/chi() parms auto-create.
+//   3. Set parm defaults: cells=9  jitter=0.8  mortar=0.055  detail=26
+//      stretch=7  grain=0.45  seed=7  debug=0
+//   4. debug=1 shows the cell map + per-cell orientation ticks
+//      (the "alignment overlay" figure for the breakdown).
+//
+// NOTE: voronoise() jitter is 0..1. Feature-point position comes back in the
+// scaled (p) space — divide by `cells` to get back to UV.
+
+// ---- pixel coordinate -> 0..1 uv ----
+float u = float(ix) / float(XRES - 1);
+float v = float(iy) / float(YRES - 1);
+vector2 st = set(u, v);
+
+float cells   = ch("cells");
+float jitter  = ch("jitter");
+float mortarw = ch("mortar");
+float dfreq   = ch("detail");
+float stretch = ch("stretch");
+float gstr    = ch("grain");
+float seed    = ch("seed");
+int   debug   = chi("debug");
+
+// ---- 1. voronoi: per-pixel cell data ----
+// f1/f2 = distances to nearest / 2nd-nearest feature point (in cell units)
+// cpos  = position of the nearest feature point (in cell units)
+vector2 p = st * cells;
+float f1, f2;
+vector cpos;
+f1 = voronoise(set(p, 0), jitter, f1, f2, cpos);
+
+// cell id without integer labels: the feature-point position is unique per cell
+vector2 cuv = cpos.xy / cells;          // feature point back in uv space
+float cellrnd = hash(cpos + seed);      // per-cell random 0..1
+float tonernd = hash(cpos + seed + 7.31);
+
+// ---- 2. per-cell frame (random angle per stone) ----
+float ang = cellrnd * 2.0 * PI;
+float ca = cos(ang), sa = sin(ang);
+
+// ---- 3. mortar + edge AO from (F2 - F1) ----
+// F2-F1 is ~0 exactly on cell borders — the standard voronoi edge trick
+float m  = smooth(0.0, mortarw, f2 - f1);
+float ao = sqrt(clamp((f2 - f1) / (mortarw * 2.5), 0.0, 1.0));
+
+// ---- 4. align the detail UVs to the cell frame, then stretch the grain ----
+vector2 rel = st - cuv;
+vector2 q = set(rel.x * ca + rel.y * sa,
+               -rel.x * sa + rel.y * ca) * dfreq;
+float grain = fbm(set(q.x, q.y * stretch, seed));   // elongated along cell x
+float tooth = fbm(st * 220.0);                       // fine surface tooth
+
+// ---- 5. shade ----
+vector stone_lo = set(0.42, 0.38, 0.34);
+vector stone_hi = set(0.62, 0.58, 0.53);
+vector base = lerp(stone_lo, stone_hi, tonernd);
+float shade = (1.0 - gstr * 0.5) + gstr * (grain - 0.5);
+shade *= 0.92 + 0.16 * tooth;
+vector stone_col = clamp(base * shade * (0.55 + 0.45 * ao), 0.0, 1.0);
+vector mortar_col = set(0.16, 0.15, 0.14) * (0.8 + 0.4 * tooth);
+vector col = lerp(mortar_col, stone_col, m);
+
+// ---- debug overlay: cell map + orientation ticks ----
+if (debug == 1) {
+    vector dccol = hsvtorgb(set(cellrnd, 0.45, 0.9));
+    vector2 dir = set(ca, sa);
+    float L = 0.32 / cells;
+    float lined = abs(rel.x * -dir.y + rel.y * dir.x);
+    float segm = (1.0 - smooth(0.002, 0.005, lined))
+               * (1.0 - smooth(L * 0.7, L, length(rel)));
+    float dotm = 1.0 - smooth(0.004, 0.008, length(rel));
+    float mark = max(segm, dotm);
+    col = dccol * (1.0 - mark) + set(0.08, 0.08, 0.08) * mark;
+}
+
+v@Cd = col;
